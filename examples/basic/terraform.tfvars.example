@@ -1,0 +1,17 @@
+region = "us-east-1"
+name   = "c2sp-witness"
+
+vpc_id             = "vpc-0123456789abcdef0"
+alb_subnet_ids     = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
+instance_subnet_id = "subnet-0123456789abcdef2"
+
+domain_name     = "witness.example.org"
+route53_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# The image you reviewed, pinned by digest.
+witness_image = "registry.example.org/c2sp-ledger-witness@sha256:<64 hex characters>"
+
+# Source CIDRs supplied (and authenticated) by the log operator.
+add_checkpoint_allowed_cidrs = ["192.0.2.0/24"]
+
+alarm_email = "oncall@example.org"

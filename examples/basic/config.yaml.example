@@ -1,0 +1,7 @@
+# Logs this witness cosigns for. origin and public_key are trust anchors: authenticate
+# them with the log operator through a channel other than the log URL before deploying.
+# The witness pins each origin's key on first start and refuses a different key later.
+logs:
+  - origin: "<log checkpoint origin>"
+    public_key: "<note-compatible log public key>"
+    url: "<public log URL>"
