@@ -1,0 +1,142 @@
+#!/bin/bash
+# Boot script for the C2SP witness instance (rendered by Terraform).
+# It installs a systemd unit; the unit prepares the data volume, key and config on every
+# start, so reboots and restarts follow the same path as the first boot.
+set -euo pipefail
+
+dnf install -y docker amazon-cloudwatch-agent sqlite
+systemctl enable --now docker
+
+install -d -m 0755 /etc/c2sp-witness
+
+cat > /etc/c2sp-witness/env <<'EOF'
+AWS_REGION=${region}
+VOLUME_ID=${volume_id}
+DATA_MOUNT=${data_mount}
+WITNESS_IMAGE=${witness_image}
+IMAGE_IS_ECR=${image_is_ecr}
+WITNESS_PORT=${witness_port}
+SECRET_ARN=${secret_arn}
+CONFIG_PARAMETER=${config_parameter}
+LOG_GROUP=${log_group_name}
+EOF
+
+cat > /usr/local/sbin/c2sp-witness-prepare <<'PREPARE'
+#!/bin/bash
+# Runs as root before every witness start. It fails closed: any error stops the start.
+set -euo pipefail
+. /etc/c2sp-witness/env
+
+dev="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$${VOLUME_ID//-/}"
+for _ in $(seq 1 120); do
+  [ -e "$dev" ] && break
+  sleep 5
+done
+[ -e "$dev" ] || { echo "data volume $VOLUME_ID is not attached" >&2; exit 1; }
+
+if ! mountpoint -q "$DATA_MOUNT"; then
+  # Format only a brand-new volume: no filesystem signature AND an all-zero first MiB.
+  # Anything else (including a volume restored from a snapshot) is never formatted.
+  rc=0
+  blkid -p "$dev" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ] && cmp -s -n 1048576 "$dev" /dev/zero; then
+    echo "formatting new data volume $VOLUME_ID"
+    mkfs.xfs -L witness-data "$dev"
+  elif [ "$rc" -ne 0 ]; then
+    echo "data volume $VOLUME_ID has no filesystem but is not blank; refusing to format" >&2
+    exit 1
+  fi
+  install -d -m 0755 "$DATA_MOUNT"
+  mount -o nodev,nosuid,noexec "$dev" "$DATA_MOUNT"
+fi
+install -d -m 0700 -o 65532 -g 65532 "$DATA_MOUNT/db"
+
+# Secrets and config live on tmpfs (/run) and are fetched fresh on every start.
+install -d -m 0750 -o root -g 65532 /run/c2sp-witness
+umask 077
+key_tmp=$(mktemp /run/c2sp-witness/key.XXXXXX)
+# The key is stored as SecretBinary so its bytes (including any trailing newline) are exact.
+aws secretsmanager get-secret-value --region "$AWS_REGION" --secret-id "$SECRET_ARN" \
+  --query SecretBinary --output text | base64 -d > "$key_tmp"
+if [ ! -s "$key_tmp" ]; then
+  rm -f "$key_tmp"
+  echo "signing key secret has no SecretBinary value yet; see the runbook" >&2
+  exit 1
+fi
+chown 65532:65532 "$key_tmp"
+chmod 0400 "$key_tmp"
+mv -f "$key_tmp" /run/c2sp-witness/witness.key
+
+aws ssm get-parameter --region "$AWS_REGION" --name "$CONFIG_PARAMETER" \
+  --query Parameter.Value --output text > /run/c2sp-witness/config.yaml
+chown 65532:65532 /run/c2sp-witness/config.yaml
+chmod 0400 /run/c2sp-witness/config.yaml
+
+if [ "$IMAGE_IS_ECR" = "true" ]; then
+  registry="$${WITNESS_IMAGE%%/*}"
+  aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$registry"
+fi
+docker pull "$WITNESS_IMAGE"
+PREPARE
+chmod 0700 /usr/local/sbin/c2sp-witness-prepare
+
+cat > /etc/systemd/system/c2sp-witness.service <<'UNIT'
+[Unit]
+Description=C2SP transparency-log witness
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/c2sp-witness/env
+ExecStartPre=/usr/local/sbin/c2sp-witness-prepare
+ExecStartPre=-/usr/bin/docker rm -f c2sp-witness
+ExecStart=/usr/bin/docker run --rm --name c2sp-witness \
+  --read-only --user 65532:65532 --cap-drop=ALL --security-opt=no-new-privileges \
+  --pids-limit=64 --memory=512m --cpus=1 \
+  -p $${WITNESS_PORT}:7667 \
+  -v $${DATA_MOUNT}/db:/data \
+  -v /run/c2sp-witness/config.yaml:/etc/witness/config.yaml:ro \
+  -v /run/c2sp-witness/witness.key:/run/secrets/witness.key:ro \
+  --log-driver=awslogs --log-opt awslogs-region=$${AWS_REGION} \
+  --log-opt awslogs-group=$${LOG_GROUP} --log-opt awslogs-stream=witness \
+  $${WITNESS_IMAGE} \
+  --listen=:7667 \
+  --private_key=/run/secrets/witness.key \
+  --config=/etc/witness/config.yaml \
+  --db=/data/witness.db \
+  --db_max_conns=1
+ExecStop=/usr/bin/docker stop --time 30 c2sp-witness
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWAGENT'
+{
+  "agent": { "omit_hostname": true },
+  "metrics": {
+    "namespace": "${metric_namespace}",
+    "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
+    "metrics_collected": {
+      "disk": {
+        "resources": ["${data_mount}"],
+        "measurement": ["used_percent"],
+        "drop_device": true,
+        "ignore_file_system_types": ["tmpfs", "devtmpfs", "overlay"]
+      }
+    }
+  }
+}
+CWAGENT
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+systemctl daemon-reload
+systemctl enable c2sp-witness.service
+# Don't block the boot script: the first start waits for the data volume to attach.
+systemctl start --no-block c2sp-witness.service
