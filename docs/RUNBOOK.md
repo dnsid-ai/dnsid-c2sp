@@ -142,7 +142,7 @@ Subscribe your on-call channel to `terraform output -raw alarm_topic_arn`. Email
 | `data-volume-usage` | Volume more than 80% full, or no usage reported | [Grow the volume](#grow-the-data-volume). Briefly expected while a new instance boots. |
 | `certificate-expiry` | Certificate expires in under 30 days | ACM renews automatically while the validation CNAME exists. Check the record and the ACM console. |
 | `witness-restarted` | The witness process started | Expected after a planned change. Otherwise read the logs and confirm `/vkey` still matches `witness.pub`. |
-| `backup-failed` | A backup or copy job failed, aborted or expired | Check AWS Backup job details; take the next scheduled backup seriously. |
+| `backup-failed` | A backup job failed, aborted or expired | Check the job in AWS Backup. Copy jobs to `backup_copy_vault_arn` are not alerted; check them there too. |
 | `instance-state` | Instance stopping, stopped or terminated | Expected during planned replacement. Otherwise investigate who and why in CloudTrail. |
 | `config-changed` | The trust-anchor configuration changed | Must match a reviewed change. Otherwise treat it as an incident. |
 | `signing-key-changed` | The key secret was written, changed or scheduled for deletion | Must match a reviewed change. Otherwise treat it as key compromise. |
@@ -244,8 +244,6 @@ aws backup list-recovery-points-by-backup-vault \
   --query 'reverse(sort_by(RecoveryPoints,&CreationDate))[:5].[CreationDate,Status]'
 ```
 
-In some AWS Organizations, an on-demand `start-backup-job` is denied by policy even though scheduled jobs succeed. Judge backup health by `list-backup-jobs` and recovery points, not by a manual job.
-
 ### Restore drill (at least yearly)
 
 The drill never touches the production instance and never uses the production key.
@@ -266,7 +264,7 @@ Use this only when the live volume is lost or corrupt. **Loss or rollback of wit
 
 1. **Fence the witness.** In a Session Manager shell, `sudo systemctl stop c2sp-witness`. Submissions now fail with 5xx errors.
 2. **Preserve evidence.** Snapshot the current volume and keep it (`aws ec2 create-snapshot --volume-id <current volume>`). Do not delete the old volume.
-3. **Restore** the chosen recovery point to a new volume **in the instance's Availability Zone**, encrypted with the module's KMS key.
+3. **Restore** the chosen recovery point to a new volume **in the instance's Availability Zone**, encrypted with the module's KMS key. A different Availability Zone or key makes Terraform want to replace the volume, which `prevent_destroy` refuses. Match `data_volume_size_gib` and gp3 too, or the next apply modifies the volume.
 4. **Inspect it offline** as in the drill: integrity check, and compare its checkpoint with the archive.
    - If it matches the latest archived checkpoint, continue.
    - If it is **behind** the archive, stop. Serving it would let the witness sign a fork from an older checkpoint. Bring it forward only by replaying the archived checkpoint with a verified consistency proof, in coordination with the log operator. If no trustworthy anchor exists, do not resume signing: retire this witness key through the [rotation](#9-key-rotation-and-compromise) process instead.
@@ -329,6 +327,25 @@ Tell the operational contact in advance about endpoint, key, trust-anchor or cap
 1. Agree a date with the log operator. Verifiers must stop requiring this witness **before** it stops.
 2. Stop the witness, take a final backup, and export the final checkpoint and the archive for retention.
 3. Keep public keys, witnessed checkpoints, audit logs and incident records for the agreed retention period.
-4. Remove protections deliberately: set `alb_deletion_protection = false` and apply. The data volume has `prevent_destroy`; take it out of Terraform state with `terraform state rm module.witness.aws_ebs_volume.data` and delete it separately once retention allows.
-5. `terraform destroy`. This removes the DNS records with the load balancer, which prevents a dangling record from being taken over. Archive objects stay until their Object Lock retention ends, so the bucket cannot be deleted before then.
-6. Destroy remaining copies of the private key once legal and incident-retention requirements allow. Deleting the Secrets Manager secret starts a 30-day recovery window.
+4. Take what must outlive the witness out of Terraform, so that `destroy` neither fails on it nor deletes it:
+
+   ```sh
+   terraform state rm \
+     module.witness.aws_ebs_volume.data \
+     module.witness.aws_kms_key.this \
+     module.witness.aws_kms_alias.this \
+     module.witness.aws_backup_vault.this \
+     module.witness.aws_s3_bucket.archive \
+     module.witness.aws_s3_bucket_ownership_controls.archive \
+     module.witness.aws_s3_bucket_public_access_block.archive \
+     module.witness.aws_s3_bucket_versioning.archive \
+     module.witness.aws_s3_bucket_server_side_encryption_configuration.archive \
+     module.witness.aws_s3_bucket_object_lock_configuration.archive \
+     module.witness.aws_s3_bucket_policy.archive \
+     module.witness.aws_cloudwatch_log_group.witness \
+     module.witness.aws_cloudwatch_log_group.waf
+   ```
+
+   Every bucket setting must leave state with the bucket, or `destroy` strips the public-access block and policy from the retained bucket. Keep the **KMS key**: the data volume, recovery points, archive objects and log groups are all encrypted with it, and scheduling its deletion makes them unreadable once the waiting period ends. If you set a Vault Lock, also remove `module.witness.aws_backup_vault_lock_configuration.this[0]`. Check the result with `terraform plan -destroy`: nothing in this list may appear in it.
+5. Set `alb_deletion_protection = false`, apply, then run `terraform destroy`. This removes the DNS records with the load balancer, which prevents a dangling record from being taken over. It also schedules the signing-key secret for deletion (30-day recovery window). Delete the retained volume, vault, bucket, log groups and finally the KMS key by hand once their retention periods allow.
+6. Destroy remaining copies of the private key once legal and incident-retention requirements allow.

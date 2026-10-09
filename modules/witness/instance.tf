@@ -65,10 +65,11 @@ resource "aws_instance" "witness" {
     encrypted             = true
     kms_key_id            = aws_kms_key.this.arn
     delete_on_termination = true
+    # Not volume_tags: that would also rewrite the separately managed data volume's tags.
+    tags = merge(local.tags, { Name = "${var.name}-root" })
   }
 
-  tags        = merge(local.tags, { Name = var.name })
-  volume_tags = merge(local.tags, { Name = "${var.name}-root" })
+  tags = merge(local.tags, { Name = var.name })
 
   lifecycle {
     # New Amazon Linux releases must not silently replace the witness. Patch on

@@ -136,6 +136,11 @@ run "allowlists" {
   }
 
   assert {
+    condition     = strcontains(jsonencode(aws_wafv2_web_acl.this.rule), "\"search_string\":\"POST\"") && !strcontains(jsonencode(aws_wafv2_web_acl.this.rule), "add-checkpoint\"")
+    error_message = "Allowlists must match on the POST method, not on a path that encodings could evade."
+  }
+
+  assert {
     condition     = local.image_is_ecr
     error_message = "An ECR image must be detected as such."
   }

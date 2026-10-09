@@ -27,12 +27,20 @@ resource "aws_sns_topic_policy" "alarms" {
         Resource  = aws_sns_topic.alarms.arn
       },
       {
-        Sid       = "AlarmPublishers"
+        Sid       = "CloudWatchAlarms"
         Effect    = "Allow"
-        Principal = { Service = ["cloudwatch.amazonaws.com", "events.amazonaws.com"] }
+        Principal = { Service = "cloudwatch.amazonaws.com" }
         Action    = "sns:Publish"
         Resource  = aws_sns_topic.alarms.arn
-        Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
+        Condition = { ArnLike = { "aws:SourceArn" = "arn:${local.partition}:cloudwatch:${local.region}:${local.account_id}:alarm:${var.name}-*" } }
+      },
+      {
+        Sid       = "EventBridgeRules"
+        Effect    = "Allow"
+        Principal = { Service = "events.amazonaws.com" }
+        Action    = "sns:Publish"
+        Resource  = aws_sns_topic.alarms.arn
+        Condition = { ArnLike = { "aws:SourceArn" = "arn:${local.partition}:events:${local.region}:${local.account_id}:rule/${var.name}-*" } }
       },
     ]
   })
@@ -225,10 +233,10 @@ locals {
 
   event_rules = {
     backup-failed = {
-      description = "A backup or copy job for the witness data volume did not complete."
+      description = "A backup job for the witness data volume did not complete."
       pattern = {
         source      = ["aws.backup"]
-        detail-type = ["Backup Job State Change", "Copy Job State Change"]
+        detail-type = ["Backup Job State Change"]
         detail = {
           state           = ["FAILED", "ABORTED", "EXPIRED"]
           backupVaultName = [aws_backup_vault.this.name]

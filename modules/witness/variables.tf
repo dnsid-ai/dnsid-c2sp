@@ -61,7 +61,7 @@ variable "route53_zone_id" {
 }
 
 variable "add_checkpoint_allowed_cidrs" {
-  description = "IPv4 CIDRs allowed to POST /add-checkpoint. Empty allows any source: nobody can forge a checkpoint, but anyone holding a validly signed one can submit it and use capacity. Ask the log operator for its egress CIDRs."
+  description = "IPv4 CIDRs allowed to send POST requests (only POST /add-checkpoint is routed). Empty allows any source: nobody can forge a checkpoint, but anyone holding a validly signed one can submit it and use capacity. Ask the log operator for its egress CIDRs."
   type        = list(string)
   default     = []
 
@@ -72,7 +72,7 @@ variable "add_checkpoint_allowed_cidrs" {
 }
 
 variable "read_allowed_cidrs" {
-  description = "IPv4 CIDRs allowed to GET /vkey and /<origin-hash>/checkpoint. Empty (the default) keeps the read endpoints public, which lets third parties observe what the witness accepted."
+  description = "IPv4 CIDRs allowed to send non-POST requests (GET /vkey and /<origin-hash>/checkpoint). Empty (the default) keeps the read endpoints public, which lets third parties observe what the witness accepted."
   type        = list(string)
   default     = []
 
@@ -202,7 +202,7 @@ variable "backup_retention_days" {
 }
 
 variable "backup_copy_vault_arn" {
-  description = "Optional backup vault in another Region or account that receives a copy of every recovery point. Use one to put backups in a separate failure domain."
+  description = "Optional backup vault in another Region or account that receives a copy of every recovery point. Use one to put backups in a separate failure domain. A cross-account copy also needs the destination vault's access policy and permission for the destination account to use this module's KMS key; the module grants neither. Copy-job failures are not alerted; check them in AWS Backup."
   type        = string
   default     = null
 }

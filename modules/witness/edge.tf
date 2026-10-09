@@ -225,6 +225,8 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
+  # The allowlists key on the HTTP method, not the path: the listener routes POST only
+  # to /add-checkpoint, so path encodings cannot slip a submission past the allowlist.
   dynamic "rule" {
     for_each = aws_wafv2_ip_set.add_checkpoint
     content {
@@ -240,10 +242,10 @@ resource "aws_wafv2_web_acl" "this" {
           statement {
             byte_match_statement {
               positional_constraint = "EXACTLY"
-              search_string         = "/add-checkpoint"
+              search_string         = "POST"
 
               field_to_match {
-                uri_path {}
+                method {}
               }
 
               text_transformation {
@@ -289,10 +291,10 @@ resource "aws_wafv2_web_acl" "this" {
               statement {
                 byte_match_statement {
                   positional_constraint = "EXACTLY"
-                  search_string         = "/add-checkpoint"
+                  search_string         = "POST"
 
                   field_to_match {
-                    uri_path {}
+                    method {}
                   }
 
                   text_transformation {
