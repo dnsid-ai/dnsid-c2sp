@@ -1,6 +1,6 @@
 # Security Policy
 
-Identity Digital takes the security of this project seriously. This document
+Known Systems AI, Inc. takes the security of this project seriously. This document
 explains how to report a vulnerability and what you can expect from us.
 
 ## Supported versions
